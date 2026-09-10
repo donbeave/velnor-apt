@@ -73,7 +73,7 @@ jobs:
             v[0-9]*.[0-9]*.[0-9]*) ;;
             *) echo "::error::invalid release tag: $version" >&2; exit 1 ;;
           esac
-          commit="$(.github/scripts/verify-release.sh resolve-commit --version "$version")"
+          commit="$(scripts/verify-release.sh resolve-commit --version "$version")"
           test "$commit" = "$state_commit"
           printf 'version=%s\ncommit=%s\n' "$version" "$commit" >> "$GITHUB_OUTPUT"
 
@@ -90,7 +90,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.release.outputs.version }}
-        run: .github/scripts/verify-release.sh download --version "$VERSION" --dir incoming
+        run: scripts/verify-release.sh download --version "$VERSION" --dir incoming
 
       - name: Authenticate source image registry
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -105,7 +105,7 @@ jobs:
           SIGNER: ${{ steps.signer.outputs.fingerprint }}
           VERSION: ${{ steps.release.outputs.version }}
         run: |
-          .github/scripts/verify-release.sh verify \
+          scripts/verify-release.sh verify \
             --version "$VERSION" \
             --incoming incoming \
             --commit "$COMMIT" \
@@ -180,7 +180,7 @@ jobs:
               --arg candidate "$VERSION" \
               --arg prior "v$prior_version" \
               --arg candidate_sha "$candidate_sha" \
-              -f .github/publication-previous.jq \
+              -f scripts/publication-previous.jq \
               previous/publication-record.json > previous-pointer.json
           else
             echo 'No prior signed repository exists; initial publication has no rollback pair.'
@@ -216,7 +216,7 @@ jobs:
           SIGNER: ${{ steps.signer.outputs.fingerprint }}
           VERSION: ${{ steps.release.outputs.version }}
         run: |
-          .github/scripts/verify-release.sh publish \
+          scripts/verify-release.sh publish \
             --version "$VERSION" \
             --incoming incoming \
             --prev-dir previous \
