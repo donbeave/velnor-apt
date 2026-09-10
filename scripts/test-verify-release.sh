@@ -11,7 +11,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SCRIPT="$HERE/verify-release.sh"
-WORKFLOW="$HERE/../workflows/publish.yml"
+WORKFLOW="$HERE/../.github/workflows/publish.yml"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
@@ -397,7 +397,7 @@ ok "private GHCR verification is authenticated with read-only authority"
 # Same-version retries must preserve the already-signed rollback identity.
 # A normal new-version publish reads the root record; an idempotent retry reads
 # its signed `previous` pointer and proves the candidate is byte-identical.
-POINTER_FILTER="$HERE/../publication-previous.jq"
+POINTER_FILTER="$HERE/publication-previous.jq"
 CANDIDATE_SHA="$(printf candidate-record | sha256sum | awk '{print $1}')"
 PRIOR_SHA="$(printf prior-record | sha256sum | awk '{print $1}')"
 jq -n --arg tag v0.1.139 --arg sha "$PRIOR_SHA" \
