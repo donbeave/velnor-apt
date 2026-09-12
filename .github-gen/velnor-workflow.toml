@@ -2,3 +2,31 @@ schema = 1
 
 [generator]
 repository = "tailrocks/velnor-apt"
+
+[workflow]
+profile = "apt-repository"
+github_runner = "ubuntu-24.04"
+velnor_labels = ["self-hosted", "velnor-target-mvp"]
+templates = ".github-gen/generated-templates"
+
+[workflow.package_update_channels]
+jackin_project = ["stable", "preview"]
+tailrocks = ["stable", "preview"]
+chainargos = ["stable"]
+default = ["stable"]
+
+[[static_files]]
+file = ".github/actions/aggregate/action.yml"
+source = ".github-gen/sources/actions/aggregate/action.yml"
+
+[[static_files]]
+file = ".github/actions/cache-contract/action.yml"
+source = ".github-gen/sources/actions/cache-contract/action.yml"
+
+[[static_files]]
+file = ".github/actions/run-gate/action.yml"
+source = ".github-gen/sources/actions/run-gate/action.yml"
+
+[[static_files]]
+file = ".github/workflows/AGENTS.md"
+source = ".github-gen/sources/workflows-AGENTS.md"
