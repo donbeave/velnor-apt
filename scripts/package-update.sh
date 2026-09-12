@@ -62,9 +62,13 @@ else
     all(.assets[]; (.sha256 | test("^[0-9a-f]{64}$"))) and
     .source_commit[0:7] ==
       (.version | capture("^[0-9]+[.][0-9]+[.][0-9]+~preview[.][0-9]+\\+(?<sha>[0-9a-f]{7})$").sha) and
+    # GitHub rewrites release asset names on upload (`~` becomes `.`), so the
+    # served assets are the dotted form while `.version` keeps the tilde
+    # contract the version grammar and dpkg ordering are defined on.
     (.version as $v |
       ([.assets[].name] | sort) ==
-      (["amd64","arm64"] | map("velnor-runner-preview-" + $v + "-" + . + ".deb") | sort))
+      (["amd64","arm64"] |
+        map("velnor-runner-preview-" + ($v | sub("~"; ".")) + "-" + . + ".deb") | sort))
   ' "$manifest" >/dev/null
 fi
 
@@ -91,8 +95,11 @@ if [ "$channel" = preview ]; then
   jq -e --arg version_re "$PREVIEW_VERSION_RE" '
     (.version | test($version_re)) and
     all(.packages[]; (.sha256 | test("^[0-9a-f]{64}$"))) and
+    # Same asset-name normalization as the manifest check: the recorded package
+    # names are the dotted download keys, never the tilde version.
     (.version as $v |
       ([.packages[].name] | sort) ==
-      (["amd64","arm64"] | map("velnor-runner-preview-" + $v + "-" + . + ".deb") | sort))
+      (["amd64","arm64"] |
+        map("velnor-runner-preview-" + ($v | sub("~"; ".")) + "-" + . + ".deb") | sort))
   ' "$state" >/dev/null
 fi

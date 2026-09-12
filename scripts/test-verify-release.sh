@@ -387,13 +387,20 @@ PVERSION="0.1.274~preview.42+abc1234"
 PBASE="0.1.274"
 PCOMMIT="abc1234000000000000000000000000000000000"
 
+# GitHub rewrites release asset names on upload (`~` becomes `.`), so the
+# fixture files must carry the dotted names the platform actually serves while
+# every version argument stays the tilde contract.
+preview_asset() { # <version> <arch> -> dotted preview asset name
+  printf 'velnor-runner-preview-%s-%s.deb\n' "${1//'~'/.}" "$2"
+}
+
 refresh_preview_metadata() { # <dir> <version> <commit> — rebuild sidecars,
   local dir="$1" ver="$2" commit="$3" arch name deb hash assets  # SHA256SUMS and
   assets="$WORK/preview-assets.$$"                               # release-manifest
   : > "$assets"
   : > "$dir/SHA256SUMS"
   for arch in $REQUIRED_ARCHES; do
-    name="velnor-runner-preview-${ver}-${arch}.deb"
+    name="$(preview_asset "$ver" "$arch")"
     deb="$dir/$name"
     hash="$(sha256_file "$deb")"
     printf '%s  %s\n' "$hash" "$name" > "$deb.sha256"
@@ -418,7 +425,7 @@ build_preview_fixture() { # <dir> <version> <commit> [identity_source_sha]
     "$identity_sha" "$base" > "$stage/build-identity.json"
   rm -rf "$dir"; mkdir -p "$dir"
   for arch in $REQUIRED_ARCHES; do
-    make_fake_deb "$dir/velnor-runner-preview-${ver}-${arch}.deb" "$arch" \
+    make_fake_deb "$dir/$(preview_asset "$ver" "$arch")" "$arch" \
       "preview-runner-$arch" "$ver" "$stage/build-identity.json"
   done
   refresh_preview_metadata "$dir" "$ver" "$commit"
@@ -492,12 +499,12 @@ mv "$D/release-manifest.json.tmp" "$D/release-manifest.json"
 expect_reject_preview "release-manifest version != requested preview version" "$D"
 
 D="$(preview_copy neg_preview_sidecar)"
-printf 'x' >> "$D/velnor-runner-preview-${PVERSION}-amd64.deb"
+printf 'x' >> "$D/$(preview_asset "$PVERSION" amd64)"
 expect_reject_preview "tampered preview deb fails its sidecar checksum" "$D"
 
 D="$(preview_copy neg_preview_extra)"
-cp "$D/velnor-runner-preview-${PVERSION}-amd64.deb" \
-  "$D/velnor-runner-preview-${PVERSION}-armhf.deb"
+cp "$D/$(preview_asset "$PVERSION" amd64)" \
+  "$D/$(preview_asset "$PVERSION" armhf)"
 expect_reject_preview "extra preview deb is rejected" "$D"
 
 D="$(preview_copy neg_preview_ref)"
@@ -527,7 +534,7 @@ rm -rf "$BAD_STAGE"; mkdir -p "$BAD_STAGE"
 printf '{"source_sha":"%s","source_ref":"refs/heads/main","kind":"preview","crate_version":"%s"}\n' \
   "ccccccc000000000000000000000000000000000" "$PBASE" \
   > "$BAD_STAGE/build-identity.json"
-make_fake_deb "$D/velnor-runner-preview-${PVERSION}-amd64.deb" amd64 \
+make_fake_deb "$D/$(preview_asset "$PVERSION" amd64)" amd64 \
   "preview-runner-amd64" "$PVERSION" "$BAD_STAGE/build-identity.json"
 refresh_preview_metadata "$D" "$PVERSION" "$PCOMMIT"
 rm -rf "$BAD_STAGE"
@@ -538,21 +545,21 @@ BAD_STAGE="$WORK/preview-bad-stage-version"
 rm -rf "$BAD_STAGE"; mkdir -p "$BAD_STAGE"
 printf '{"source_sha":"%s","source_ref":"refs/heads/main","kind":"preview","crate_version":"%s"}\n' \
   "$PCOMMIT" "0.1.273" > "$BAD_STAGE/build-identity.json"
-make_fake_deb "$D/velnor-runner-preview-${PVERSION}-amd64.deb" amd64 \
+make_fake_deb "$D/$(preview_asset "$PVERSION" amd64)" amd64 \
   "preview-runner-amd64" "$PVERSION" "$BAD_STAGE/build-identity.json"
 refresh_preview_metadata "$D" "$PVERSION" "$PCOMMIT"
 rm -rf "$BAD_STAGE"
 expect_reject_preview "preview deb build-identity crate_version != preview base version" "$D"
 
 D="$(preview_copy neg_preview_control)"
-make_fake_deb "$D/velnor-runner-preview-${PVERSION}-amd64.deb" arm64 \
+make_fake_deb "$D/$(preview_asset "$PVERSION" amd64)" arm64 \
   "preview-runner-amd64" "$PVERSION"
 refresh_preview_metadata "$D" "$PVERSION" "$PCOMMIT"
 expect_reject_preview "preview deb control architecture disagrees with the asset arch" "$D"
 
 D="$(preview_copy neg_preview_sums)"
 printf '%s  %s\n' "$(sha256_str stray)" \
-  "velnor-runner-preview-${PVERSION}-amd64.deb" >> "$D/SHA256SUMS"
+  "$(preview_asset "$PVERSION" amd64)" >> "$D/SHA256SUMS"
 expect_reject_preview "SHA256SUMS carries more than the two preview deb lines" "$D"
 
 # --- preview publication: one shared tree, per-suite subcommand ---------------
@@ -595,6 +602,11 @@ name="$(basename "$2" .deb)"
 field="$3"
 arch="$(printf '%s' "$name" | sed -E 's/^.*[-_]([^-_]+)$/\1/')"
 version="$(printf '%s' "${name%[-_]"$arch"}" | sed -E 's/^velnor-runner(-preview)?[-_]//')"
+# GitHub rewrites release asset names on upload (`~` -> `.`); the control
+# Version still carries the tilde contract, so decode the preview asset form
+# back before reporting it. Only the `~preview.` dot maps, so stable versions
+# (all dots) are untouched.
+version="${version/\.preview\./~preview.}"
 case "$field" in
   Package) printf '%s\n' velnor-runner ;;
   Version) printf '%s\n' "$version" ;;
