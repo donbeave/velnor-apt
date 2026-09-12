@@ -166,12 +166,16 @@ cmd_resolve_commit() {
 download_preview() {
   local ver="$1" dir="$2"
   parse_preview_version "$ver"
+  # GitHub rewrites release asset names on upload: `~` becomes `.`. Match the
+  # dotted filenames the rolling release actually serves; `$ver` itself stays
+  # the tilde version the grammar and the release name are defined on.
+  local asset_version="${ver//'~'/.}"
   # Pull ONLY the coherence inputs from the rolling preview release.
   gh release download "$PREVIEW_TAG" --repo "$SOURCE_REPO" --dir "$dir" \
-    --pattern "velnor-runner-preview-${ver}-amd64.deb" \
-    --pattern "velnor-runner-preview-${ver}-amd64.deb.sha256" \
-    --pattern "velnor-runner-preview-${ver}-arm64.deb" \
-    --pattern "velnor-runner-preview-${ver}-arm64.deb.sha256" \
+    --pattern "velnor-runner-preview-${asset_version}-amd64.deb" \
+    --pattern "velnor-runner-preview-${asset_version}-amd64.deb.sha256" \
+    --pattern "velnor-runner-preview-${asset_version}-arm64.deb" \
+    --pattern "velnor-runner-preview-${asset_version}-arm64.deb.sha256" \
     --pattern 'release-manifest.json' \
     --pattern 'SHA256SUMS'
   log "downloaded preview coherence inputs for $ver into $dir"
@@ -390,9 +394,13 @@ verify_preview() {
   require_file "$sums"
 
   # --- exactly the two expected preview debs, no extras ------------------------
-  local deb_count deb_amd64 deb_arm64
-  deb_amd64="velnor-runner-preview-${ver}-amd64.deb"
-  deb_arm64="velnor-runner-preview-${ver}-arm64.deb"
+  # Asset files carry the GitHub-normalized dotted form of the version (`~` is
+  # rewritten to `.` on upload); every version-contract check below still uses
+  # `$ver` and the release-manifest version field.
+  local deb_count asset_version deb_amd64 deb_arm64
+  asset_version="${ver//'~'/.}"
+  deb_amd64="velnor-runner-preview-${asset_version}-amd64.deb"
+  deb_arm64="velnor-runner-preview-${asset_version}-arm64.deb"
   deb_count="$(find "$incoming" -maxdepth 1 -name 'velnor-runner-*.deb' | wc -l | tr -d ' ')"
   [ "$deb_count" = "2" ] || fail "expected exactly 2 preview debs in $incoming, found $deb_count (extra/missing deb)"
   require_file "$incoming/$deb_amd64"
@@ -412,7 +420,7 @@ verify_preview() {
   # --- per-arch sidecar, SHA256SUMS, manifest hash, and packaged identity ------
   local arch deb_name deb deb_sum want_deb have_deb manifest_deb sums_line
   for arch in $REQUIRED_ARCHES; do
-    deb_name="velnor-runner-preview-${ver}-${arch}.deb"
+    deb_name="velnor-runner-preview-${asset_version}-${arch}.deb"
     deb="$incoming/$deb_name"
     deb_sum="$deb.sha256"
     require_file "$deb_sum"

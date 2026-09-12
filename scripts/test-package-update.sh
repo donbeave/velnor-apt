@@ -43,13 +43,15 @@ fi
 # The rolling `preview` release carries no release-record/identity pair: its
 # release-manifest.json is the only source-owned record, the version follows
 # X.Y.Z~preview.N+<7-hex> bound to the main commit, and the state lands in
-# package-state-preview.json without ever touching package-state.json.
+# package-state-preview.json without ever touching package-state.json. The
+# assets use the dotted form GitHub serves (`~` is rewritten to `.` on upload).
 preview_version="1.2.3~preview.7+0123456"
+preview_asset_version="1.2.3.preview.7+0123456"
 pverified="$tmp/verified-preview"
 mkdir "$pverified"
 : > "$tmp/preview-assets.jsonl"
 for arch in amd64 arm64; do
-  name="velnor-runner-preview-${preview_version}-${arch}.deb"
+  name="velnor-runner-preview-${preview_asset_version}-${arch}.deb"
   printf 'preview-fixture-%s\n' "$arch" > "$pverified/$name"
   digest=$(shasum -a 256 "$pverified/$name" | awk '{print $1}')
   jq -cn --arg name "$name" --arg sha256 "$digest" '{name:$name,sha256:$sha256}' >> "$tmp/preview-assets.jsonl"
@@ -72,20 +74,26 @@ jq -Sn --arg source_repository tailrocks/velnor --arg source_ref refs/heads/main
   shasum -a 256 package-state.json > "$tmp/stable-state.sha"
   VELNOR_PACKAGE_CHANNEL=preview VELNOR_VERIFIED_PACKAGE_DIR="$pverified" ./scripts/package-update.sh
   jq -e '.version=="1.2.3~preview.7+0123456" and .source_ref=="refs/heads/main" and
-         (.packages|length)==2 and .schema=="velnor.apt-package-state.v1"' \
+         (.packages|length)==2 and .schema=="velnor.apt-package-state.v1" and
+         ([.packages[].name] | sort) == ([
+           "velnor-runner-preview-1.2.3.preview.7+0123456-amd64.deb",
+           "velnor-runner-preview-1.2.3.preview.7+0123456-arm64.deb"] | sort)' \
     package-state-preview.json
   shasum -a 256 -c "$tmp/stable-state.sha"
 )
 
 # Every incoherent preview manifest must be rejected without writing state.
 mkdir -p "$tmp/preview-bad"
-for case in ref grammar sha asset-name single-asset; do
+for case in ref grammar sha asset-name asset-version single-asset; do
   case "$case" in
-    ref)         mutation='.source_ref = "refs/tags/v1.2.3"' ;;
-    grammar)     mutation='.version = "1.2.3"' ;;
-    sha)         mutation='.source_commit = "fffffffffffffffffffffffffffffffffffffff0"' ;;
-    asset-name)  mutation='(.assets[0].name) = "velnor-runner-preview-9.9.9~preview.1+0123456-amd64.deb"' ;;
-    single-asset) mutation='.assets |= .[0:1]' ;;
+    ref)           mutation='.source_ref = "refs/tags/v1.2.3"' ;;
+    grammar)       mutation='.version = "1.2.3"' ;;
+    sha)           mutation='.source_commit = "fffffffffffffffffffffffffffffffffffffff0"' ;;
+    # A tilde asset name can never be served (`~` is rewritten to `.` on
+    # upload); a dotted name for a foreign version is a different release.
+    asset-name)    mutation='(.assets[0].name) = "velnor-runner-preview-9.9.9~preview.1+0123456-amd64.deb"' ;;
+    asset-version) mutation='(.assets[0].name) = "velnor-runner-preview-9.9.9.preview.1+0123456-amd64.deb"' ;;
+    single-asset)  mutation='.assets |= .[0:1]' ;;
   esac
   rm -f "$tmp/repo/package-state-preview.json"
   jq "$mutation" "$pverified/release-manifest.json" > "$tmp/preview-bad/release-manifest.json"
