@@ -58,9 +58,10 @@ JSON
 # Hand-assemble a .deb (ar archive with data.tar.gz) shipping the identity files.
 make_fake_deb() {
   local out="$1" arch="$2" binary_bytes="${3:-runner-$2}" version="${4:-$VER}"
+  local identity="${5:-$WORK/build-identity.json}"
   local stage; stage="$(mktemp -d)"
   mkdir -p "$stage/root/usr/share/velnor" "$stage/root/usr/bin"
-  cp "$WORK/build-identity.json" "$stage/root/usr/share/velnor/build-identity.json"
+  cp "$identity" "$stage/root/usr/share/velnor/build-identity.json"
   cp "$BASE/manifest.json" "$stage/root/usr/share/velnor/manifest.json"
   printf '%s' "$binary_bytes" > "$stage/root/usr/bin/velnor-runner"
   printf 'control-panel-%s' "$arch" > "$stage/root/usr/bin/velnorctl"
@@ -284,7 +285,7 @@ expect_reject "extracted runner binary disagrees with record" "$D"
 PUB="$WORK/publish"
 mkdir -p "$PUB/bin" "$PUB/run" "$PUB/previous"
 cp -R "$POS/." "$PUB/run/"
-PREVIOUS_RECORD_SHA="$(printf previous-record | sha256sum | awk '{print $1}')"
+PREVIOUS_RECORD_SHA="$(sha256_str previous-record)"
 jq -n --arg tag v0.1.120 --arg sha "$PREVIOUS_RECORD_SHA" \
   '{tag:$tag, source_record_sha256:$sha}' > "$PUB/previous-pointer.json"
 for arch in $REQUIRED_ARCHES; do
@@ -376,8 +377,422 @@ fi
   || die "publication mutated staging before signer unlock"
 ok "publication fails before staging mutation without a signer passphrase"
 
+# ============================ preview suite ===================================
+# The rolling `preview` release has no tag and no release record: its coherence
+# chain is release-manifest.json + the per-deb sidecars + SHA256SUMS + the
+# build-identity shipped inside each deb, all bound to the caller-supplied main
+# commit. Same sentinel contract as stable: positive arms it, negatives exit
+# non-zero without it.
+PVERSION="0.1.274~preview.42+abc1234"
+PBASE="0.1.274"
+PCOMMIT="abc1234000000000000000000000000000000000"
+
+refresh_preview_metadata() { # <dir> <version> <commit> — rebuild sidecars,
+  local dir="$1" ver="$2" commit="$3" arch name deb hash assets  # SHA256SUMS and
+  assets="$WORK/preview-assets.$$"                               # release-manifest
+  : > "$assets"
+  : > "$dir/SHA256SUMS"
+  for arch in $REQUIRED_ARCHES; do
+    name="velnor-runner-preview-${ver}-${arch}.deb"
+    deb="$dir/$name"
+    hash="$(sha256_file "$deb")"
+    printf '%s  %s\n' "$hash" "$name" > "$deb.sha256"
+    printf '%s  %s\n' "$hash" "$name" >> "$dir/SHA256SUMS"
+    jq -cn --arg name "$name" --arg sha256 "$hash" '{name:$name,sha256:$sha256}' >> "$assets"
+  done
+  jq -Sn --arg source_repository "tailrocks/velnor" --arg source_ref "refs/heads/main" \
+    --arg source_commit "$commit" --arg version "$ver" --slurpfile assets "$assets" \
+    '{schema:"velnor.package-release.v1", source_repository:$source_repository,
+      source_ref:$source_ref, source_commit:$source_commit, version:$version,
+      assets:$assets}' > "$dir/release-manifest.json"
+  rm -f "$assets"
+}
+
+build_preview_fixture() { # <dir> <version> <commit> [identity_source_sha]
+  local dir="$1" ver="$2" commit="$3" arch
+  local identity_sha="${4:-$commit}"
+  local base="${ver%%~*}"
+  local stage="$WORK/preview-stage.$$"
+  rm -rf "$stage"; mkdir -p "$stage"
+  printf '{"source_sha":"%s","source_ref":"refs/heads/main","kind":"preview","crate_version":"%s"}\n' \
+    "$identity_sha" "$base" > "$stage/build-identity.json"
+  rm -rf "$dir"; mkdir -p "$dir"
+  for arch in $REQUIRED_ARCHES; do
+    make_fake_deb "$dir/velnor-runner-preview-${ver}-${arch}.deb" "$arch" \
+      "preview-runner-$arch" "$ver" "$stage/build-identity.json"
+  done
+  refresh_preview_metadata "$dir" "$ver" "$commit"
+  rm -rf "$stage"
+}
+
+preview_copy() {
+  local dir="$WORK/$1"
+  rm -rf "$dir"; mkdir -p "$dir"
+  cp -R "$PBASE/." "$dir/"
+  printf '%s\n' "$dir"
+}
+
+run_verify_preview() { # dir + extra args -> exit code
+  local dir="$1"; shift
+  bash "$SCRIPT" verify --suite preview --version "$PVERSION" --incoming "$dir" \
+    --commit "$PCOMMIT" --signer "$SIGNER" --expect-signer "$SIGNER" "$@" >/dev/null 2>&1
+}
+
+expect_reject_preview() { # desc dir [extra args...]
+  local desc="$1" dir="$2"; shift 2
+  if run_verify_preview "$dir" "$@"; then
+    die "expected rejection but preview verify passed: $desc"
+  fi
+  [ ! -f "$dir/.reprepro-ok" ] || die "sentinel armed despite preview rejection: $desc"
+  ok "preview rejected: $desc"
+}
+
+PBASE="$WORK/preview-base"
+build_preview_fixture "$PBASE" "$PVERSION" "$PCOMMIT"
+
+PP="$(preview_copy preview_positive)"
+run_verify_preview "$PP" || die "coherent preview fixture should verify"
+[ -f "$PP/.reprepro-ok" ] || die "positive preview fixture did not arm the reprepro sentinel"
+ok "coherent preview release verifies and arms the sentinel"
+
+# Preview verify is commit-driven: there is no tag to resolve, so a missing or
+# malformed commit must stop before any publication path.
+D="$(preview_copy neg_preview_no_commit)"
+if bash "$SCRIPT" verify --suite preview --version "$PVERSION" --incoming "$D" \
+     --signer "$SIGNER" --expect-signer "$SIGNER" >/dev/null 2>&1; then
+  die "expected rejection when the preview commit is missing"
+fi
+[ ! -f "$D/.reprepro-ok" ] || die "sentinel armed without a preview commit"
+ok "preview rejected: no commit supplied (there is no tag to resolve)"
+
+D="$(preview_copy neg_preview_suffix)"
+if bash "$SCRIPT" verify --suite preview --version "$PVERSION" --incoming "$D" \
+     --commit "ffffffffffffffffffffffffffffffffffffffff" \
+     --signer "$SIGNER" --expect-signer "$SIGNER" >/dev/null 2>&1; then
+  die "expected rejection when the version suffix does not match the commit"
+fi
+[ ! -f "$D/.reprepro-ok" ] || die "sentinel armed on preview version/commit drift"
+ok "preview rejected: version suffix does not abbreviate the supplied commit"
+
+for bad_version in "0.1.274-preview.42+abc1234" "v0.1.274~preview.42+abc1234" \
+                   "0.1.274~preview.42+abc123" "0.1.274~preview.42"; do
+  D="$(preview_copy neg_preview_grammar)"
+  if bash "$SCRIPT" verify --suite preview --version "$bad_version" --incoming "$D" \
+       --commit "$PCOMMIT" --signer "$SIGNER" --expect-signer "$SIGNER" >/dev/null 2>&1; then
+    die "expected rejection of off-grammar preview version: $bad_version"
+  fi
+  [ ! -f "$D/.reprepro-ok" ] || die "sentinel armed on off-grammar preview version: $bad_version"
+done
+ok "preview rejected: version grammar (separator, v-prefix, short/absent commit)"
+
+D="$(preview_copy neg_preview_manifest_version)"
+jq --arg v "0.1.274~preview.43+abc1234" '.version = $v' "$D/release-manifest.json" \
+  > "$D/release-manifest.json.tmp"
+mv "$D/release-manifest.json.tmp" "$D/release-manifest.json"
+expect_reject_preview "release-manifest version != requested preview version" "$D"
+
+D="$(preview_copy neg_preview_sidecar)"
+printf 'x' >> "$D/velnor-runner-preview-${PVERSION}-amd64.deb"
+expect_reject_preview "tampered preview deb fails its sidecar checksum" "$D"
+
+D="$(preview_copy neg_preview_extra)"
+cp "$D/velnor-runner-preview-${PVERSION}-amd64.deb" \
+  "$D/velnor-runner-preview-${PVERSION}-armhf.deb"
+expect_reject_preview "extra preview deb is rejected" "$D"
+
+D="$(preview_copy neg_preview_ref)"
+jq '.source_ref = "refs/tags/v0.1.274"' "$D/release-manifest.json" \
+  > "$D/release-manifest.json.tmp"
+mv "$D/release-manifest.json.tmp" "$D/release-manifest.json"
+expect_reject_preview "preview release-manifest source_ref is not refs/heads/main" "$D"
+
+D="$(preview_copy neg_preview_repo)"
+jq '.source_repository = "tailrocks/other"' "$D/release-manifest.json" \
+  > "$D/release-manifest.json.tmp"
+mv "$D/release-manifest.json.tmp" "$D/release-manifest.json"
+expect_reject_preview "preview release-manifest source_repository mismatch" "$D"
+
+D="$(preview_copy neg_preview_commit)"
+jq --arg c "bbbbbbb000000000000000000000000000000000" '.source_commit = $c' \
+  "$D/release-manifest.json" > "$D/release-manifest.json.tmp"
+mv "$D/release-manifest.json.tmp" "$D/release-manifest.json"
+expect_reject_preview "preview release-manifest commit != supplied commit" "$D"
+
+# Only the EXTRACTED identity may disagree: rebuild a deb whose packaged
+# build-identity carries a foreign commit, then re-pin its bytes in the sidecar,
+# SHA256SUMS, and the manifest asset hash.
+D="$(preview_copy neg_preview_identity)"
+BAD_STAGE="$WORK/preview-bad-stage"
+rm -rf "$BAD_STAGE"; mkdir -p "$BAD_STAGE"
+printf '{"source_sha":"%s","source_ref":"refs/heads/main","kind":"preview","crate_version":"%s"}\n' \
+  "ccccccc000000000000000000000000000000000" "$PBASE" \
+  > "$BAD_STAGE/build-identity.json"
+make_fake_deb "$D/velnor-runner-preview-${PVERSION}-amd64.deb" amd64 \
+  "preview-runner-amd64" "$PVERSION" "$BAD_STAGE/build-identity.json"
+refresh_preview_metadata "$D" "$PVERSION" "$PCOMMIT"
+rm -rf "$BAD_STAGE"
+expect_reject_preview "preview deb build-identity source_sha disagrees with the commit" "$D"
+
+D="$(preview_copy neg_preview_identity_version)"
+BAD_STAGE="$WORK/preview-bad-stage-version"
+rm -rf "$BAD_STAGE"; mkdir -p "$BAD_STAGE"
+printf '{"source_sha":"%s","source_ref":"refs/heads/main","kind":"preview","crate_version":"%s"}\n' \
+  "$PCOMMIT" "0.1.273" > "$BAD_STAGE/build-identity.json"
+make_fake_deb "$D/velnor-runner-preview-${PVERSION}-amd64.deb" amd64 \
+  "preview-runner-amd64" "$PVERSION" "$BAD_STAGE/build-identity.json"
+refresh_preview_metadata "$D" "$PVERSION" "$PCOMMIT"
+rm -rf "$BAD_STAGE"
+expect_reject_preview "preview deb build-identity crate_version != preview base version" "$D"
+
+D="$(preview_copy neg_preview_control)"
+make_fake_deb "$D/velnor-runner-preview-${PVERSION}-amd64.deb" arm64 \
+  "preview-runner-amd64" "$PVERSION"
+refresh_preview_metadata "$D" "$PVERSION" "$PCOMMIT"
+expect_reject_preview "preview deb control architecture disagrees with the asset arch" "$D"
+
+D="$(preview_copy neg_preview_sums)"
+printf '%s  %s\n' "$(sha256_str stray)" \
+  "velnor-runner-preview-${PVERSION}-amd64.deb" >> "$D/SHA256SUMS"
+expect_reject_preview "SHA256SUMS carries more than the two preview deb lines" "$D"
+
+# --- preview publication: one shared tree, per-suite subcommand ---------------
+# The caller assembles ./public by running publish once per suite, so preview
+# must stage into the tree stable already built and leave every stable artifact
+# byte-identical.
+PUBP="$WORK/publish-preview"
+mkdir -p "$PUBP/bin" "$PUBP/run" "$PUBP/preview-previous" "$PUBP/preview-incoming"
+cp -R "$POS/." "$PUBP/run/"
+cp -R "$PBASE/." "$PUBP/preview-incoming/"
+printf '%s\n' '"preview"' > "$PUBP/preview-pointer.json"
+PREVIEW_ROLLBACK="0.1.274~preview.41+abc1234"
+build_preview_fixture "$PUBP/preview-previous" "$PREVIEW_ROLLBACK" "$PCOMMIT"
+
+cat > "$PUBP/bin/apt-ftparchive" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "$1" = "-a" ]; then
+  arch="$2"
+  for deb in "$4"/main/v/velnor-runner/*.deb; do
+    [ -f "$deb" ] || continue
+    name="$(basename "$deb" .deb)"
+    parch="$(printf '%s' "$name" | sed -E 's/^.*[-_]([^-_]+)$/\1/')"
+    [ "$parch" = "$arch" ] || continue
+    version="$(printf '%s' "${name%_"$parch"}" | sed -E 's/^velnor-runner(-preview)?[-_]//')"
+    printf 'Package: velnor-runner\nVersion: %s\nArchitecture: %s\nFilename: %s\nSHA256: fixture\n\n' \
+      "$version" "$parch" "$deb"
+  done
+else
+  suite=stable
+  case "${2:-}" in dists/preview) suite=preview ;; esac
+  printf 'Origin: Velnor\nSuite: %s\nCodename: %s\n' "$suite" "$suite"
+fi
+SH
+cat > "$PUBP/bin/dpkg-deb" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1" = -f ] || exit 1
+name="$(basename "$2" .deb)"
+field="$3"
+arch="$(printf '%s' "$name" | sed -E 's/^.*[-_]([^-_]+)$/\1/')"
+version="$(printf '%s' "${name%[-_]"$arch"}" | sed -E 's/^velnor-runner(-preview)?[-_]//')"
+case "$field" in
+  Package) printf '%s\n' velnor-runner ;;
+  Version) printf '%s\n' "$version" ;;
+  Architecture) printf '%s\n' "$arch" ;;
+  *) exit 1 ;;
+esac
+SH
+cat > "$PUBP/bin/dpkg" <<'SH'
+#!/usr/bin/env bash
+# Stand-in for `dpkg --compare-versions`: implements dpkg's verrevcmp ordering
+# (~ sorts before end-of-string, numeric runs compare numerically, non-digits by
+# the dpkg order table) so the preview monotonicity gate is exercised for real.
+set -euo pipefail
+[ "${1:-}" = "--compare-versions" ] || { echo "fake dpkg: unsupported call" >&2; exit 1; }
+left="$2" op="$3" right="$4"
+export FAKE_LEFT="$left" FAKE_OP="$op" FAKE_RIGHT="$right"
+awk '
+function dpkg_order(c) {
+  if (c == "~") return -1
+  if (c ~ /[A-Za-z]/) return index(ASCII, c) + 31
+  return index(ASCII, c) + 31 + 256
+}
+function vercmp(x, y,   lx, ly, i, j, first_diff, xc, yc) {
+  lx = length(x); ly = length(y); i = 1; j = 1
+  while (i <= lx || j <= ly) {
+    first_diff = 0
+    while ((i <= lx && substr(x, i, 1) !~ /[0-9]/) || (j <= ly && substr(y, j, 1) !~ /[0-9]/)) {
+      xc = (i <= lx) ? dpkg_order(substr(x, i, 1)) : 0
+      yc = (j <= ly) ? dpkg_order(substr(y, j, 1)) : 0
+      if (xc != yc) return (xc < yc) ? -1 : 1
+      i++; j++
+    }
+    while (substr(x, i, 1) == "0") i++
+    while (substr(y, j, 1) == "0") j++
+    while (substr(x, i, 1) ~ /[0-9]/ && substr(y, j, 1) ~ /[0-9]/) {
+      if (first_diff == 0 && substr(x, i, 1) != substr(y, j, 1))
+        first_diff = (substr(x, i, 1) < substr(y, j, 1)) ? -1 : 1
+      i++; j++
+    }
+    if (substr(x, i, 1) ~ /[0-9]/) return 1
+    if (substr(y, j, 1) ~ /[0-9]/) return -1
+    if (first_diff != 0) return first_diff
+  }
+  return 0
+}
+function decide(sign,  op) {
+  op = ENVIRON["FAKE_OP"]
+  if (op == "lt") return sign < 0
+  if (op == "le") return sign <= 0
+  if (op == "eq") return sign == 0
+  if (op == "ge") return sign >= 0
+  if (op == "gt") return sign > 0
+  if (op == "ne") return sign != 0
+  return 0
+}
+BEGIN {
+  ASCII = ""
+  for (i = 32; i < 127; i++) ASCII = ASCII sprintf("%c", i)
+  exit (decide(vercmp(ENVIRON["FAKE_LEFT"], ENVIRON["FAKE_RIGHT"])) ? 0 : 1)
+}
+'
+SH
+cat > "$PUBP/bin/gpg" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while [ $# -gt 0 ]; do
+  case "$1" in --output) out="$2"; shift 2 ;; *) shift ;; esac
+done
+[ -n "$out" ]
+printf 'detached-signature\n' > "$out"
+SH
+cat > "$PUBP/bin/gpgconf" <<'SH'
+#!/usr/bin/env bash
+set -euo pipefail
+[ "$1 $2" = "--kill gpg-agent" ]
+SH
+chmod +x "$PUBP/bin/apt-ftparchive" "$PUBP/bin/dpkg-deb" "$PUBP/bin/dpkg" \
+  "$PUBP/bin/gpg" "$PUBP/bin/gpgconf"
+
+run_publish() { # <cwd> <suite> <version> <incoming> <prev-dir> <pointer>
+  local cwd="$1" suite="$2" version="$3" incoming="$4" prev_dir="$5" pointer="$6"
+  (
+    cd "$cwd"
+    PATH="$PUBP/bin:$PATH" APT_GPG_PASSPHRASE='fixture-passphrase' \
+      bash "$SCRIPT" publish --suite "$suite" --version "$version" --incoming "$incoming" \
+        --prev-dir "$prev_dir" --previous-pointer "$pointer" --signer "$SIGNER"
+  )
+}
+
+# Publication only ever consumes a directory the verifier armed.
+run_verify_preview "$PUBP/preview-incoming" \
+  || die "coherent preview fixture should verify before publication"
+
+# Stable first, exactly as the shared-tree caller does.
+run_publish "$PUBP/run" stable "$VERSION" . "$PUB/previous" "$PUB/previous-pointer.json" \
+  || die "stable publication failed while assembling the shared tree"
+(
+  cd "$PUBP/run"
+  shasum -a 256 public/publication-record.json public/last-publish \
+    public/dists/stable/InRelease public/dists/stable/main/binary-amd64/Packages \
+    public/dists/stable/main/binary-arm64/Packages public/pool/main/v/velnor-runner/*.deb \
+    > "$PUBP/stable-before.sha"
+)
+
+run_publish "$PUBP/run" preview "$PVERSION" "$PUBP/preview-incoming" \
+  "$PUBP/preview-previous" "$PUBP/preview-pointer.json" \
+  || die "preview publication failed inside the shared tree"
+
+[ -f "$PUBP/run/public/publication-record-preview.json" ] \
+  || die "preview publication record missing from the Pages tree"
+[ -f "$PUBP/run/public/publication-record-preview.json.sig" ] \
+  || die "preview publication signature missing from the Pages tree"
+[ -f "$PUBP/run/public/dists/preview/InRelease" ] || die "preview InRelease missing"
+[ -f "$PUBP/run/public/dists/preview/Release.gpg" ] || die "preview Release.gpg missing"
+[ "$(cat "$PUBP/run/public/last-publish-preview")" = "$PVERSION" ] \
+  || die "preview last-publish pointer mismatch"
+[ "$(find "$PUBP/run/public/pool/preview" -type f -name '*.deb' | wc -l | tr -d ' ')" = "4" ] \
+  || die "preview pool does not retain exactly the candidate and rollback pairs"
+for arch in $REQUIRED_ARCHES; do
+  [ -f "$PUBP/run/public/pool/preview/main/v/velnor-runner/velnor-runner_${PVERSION}_${arch}.deb" ] \
+    || die "preview candidate not staged under its canonical dpkg name ($arch)"
+  [ "$(awk '$1=="Version:"{print $2}' \
+      "$PUBP/run/public/dists/preview/main/binary-$arch/Packages" | sort -u | wc -l | tr -d ' ')" = 2 ] \
+    || die "$arch preview index does not retain two versions"
+done
+grep -q '^Codename: stable$' "$PUBP/run/public/conf/distributions" \
+  || die "preview publication dropped the stable distribution stanza"
+grep -q '^Codename: preview$' "$PUBP/run/public/conf/distributions" \
+  || die "preview publication did not add its distribution stanza"
+[ "$(grep -c '^Codename: preview$' "$PUBP/run/public/conf/distributions")" = "1" ] \
+  || die "preview publication duplicated its distribution stanza"
+jq -e --arg version "$PVERSION" '
+  .schema == "velnor.publication-record/v1" and .suite == "preview" and
+  .tag == "preview" and .crate_version == $version and .previous == "preview" and
+  (.source_record_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+  ([.packages[].arch] | sort) == ["amd64","arm64"]
+' "$PUBP/run/public/publication-record-preview.json" >/dev/null \
+  || die "preview publication record does not identify the preview suite"
+(
+  cd "$PUBP/run"
+  shasum -a 256 -c "$PUBP/stable-before.sha" >/dev/null
+) || die "preview publication mutated the stable suite artifacts"
+ok "preview publication stages into the shared tree without touching the stable suite"
+
+# A preview may never replace an equal or newer retained version.
+NEWER_PREVIEW="$WORK/publish-preview-newer"
+mkdir -p "$NEWER_PREVIEW/previous" "$NEWER_PREVIEW/incoming"
+cp -R "$PBASE/." "$NEWER_PREVIEW/incoming/"
+build_preview_fixture "$NEWER_PREVIEW/previous" "0.1.274~preview.43+abc1234" "$PCOMMIT"
+run_verify_preview "$NEWER_PREVIEW/incoming" \
+  || die "coherent preview fixture should verify before the monotonicity check"
+if run_publish "$NEWER_PREVIEW" preview "$PVERSION" "$NEWER_PREVIEW/incoming" \
+     "$NEWER_PREVIEW/previous" "$PUBP/preview-pointer.json" >/dev/null 2>&1; then
+  die "preview publication accepted a candidate older than the retained rollback"
+fi
+# The candidate regressed, so nothing may be signed for it: no index, no record.
+[ ! -f "$NEWER_PREVIEW/public/dists/preview/InRelease" ] \
+  || die "preview publication signed indexes for a regressing candidate"
+[ ! -f "$NEWER_PREVIEW/public/publication-record-preview.json" ] \
+  || die "preview publication recorded a regressing candidate"
+ok "preview rejected: candidate is older than the retained rollback version"
+
+SAME_PREVIEW="$WORK/publish-preview-same"
+mkdir -p "$SAME_PREVIEW/previous" "$SAME_PREVIEW/incoming"
+cp -R "$PBASE/." "$SAME_PREVIEW/incoming/"
+build_preview_fixture "$SAME_PREVIEW/previous" "$PVERSION" "$PCOMMIT"
+run_verify_preview "$SAME_PREVIEW/incoming" || die "preview fixture should verify"
+if run_publish "$SAME_PREVIEW" preview "$PVERSION" "$SAME_PREVIEW/incoming" \
+     "$SAME_PREVIEW/previous" "$PUBP/preview-pointer.json" >/dev/null 2>&1; then
+  die "preview publication accepted an equal retained version"
+fi
+ok "preview rejected: candidate equals the retained rollback version"
+
+SAME_POINTER="$WORK/publish-preview-pointer"
+mkdir -p "$SAME_POINTER/previous" "$SAME_POINTER/incoming"
+cp -R "$PBASE/." "$SAME_POINTER/incoming/"
+build_preview_fixture "$SAME_POINTER/previous" "$PREVIEW_ROLLBACK" "$PCOMMIT"
+run_verify_preview "$SAME_POINTER/incoming" || die "preview fixture should verify"
+jq -n --arg tag "v$PBASE" '{tag:$tag}' > "$SAME_POINTER/pointer.json"
+if run_publish "$SAME_POINTER" preview "$PVERSION" "$SAME_POINTER/incoming" \
+     "$SAME_POINTER/previous" "$SAME_POINTER/pointer.json" >/dev/null 2>&1; then
+  die "preview publication accepted a stable-style previous pointer"
+fi
+ok "preview rejected: previous pointer is not the JSON string \"preview\""
+
+UNVERIFIED="$WORK/publish-preview-unverified"
+mkdir -p "$UNVERIFIED"
+build_preview_fixture "$UNVERIFIED" "$PVERSION" "$PCOMMIT"
+if run_publish "$PUBP/run" preview "$PVERSION" "$UNVERIFIED" \
+     "$PUBP/preview-previous" "$PUBP/preview-pointer.json" >/dev/null 2>&1; then
+  die "preview publication accepted an unverified candidate directory"
+fi
+[ ! -e "$PUBP/run/public/publication-record-preview.json.tmp" ] \
+  || die "preview publication wrote despite the missing sentinel"
+ok "preview rejected: publication without the armed reprepro sentinel"
+
 # The source image is private. Its verifier must receive only package-read
-# authority and authenticate before asking Buildx to inspect the pinned digest.
 grep -q '^  packages: read$' "$WORKFLOW" \
   || die "publisher lacks package-read authority"
 ! grep -q '^  packages: write$' "$WORKFLOW" \
@@ -398,8 +813,8 @@ ok "private GHCR verification is authenticated with read-only authority"
 # A normal new-version publish reads the root record; an idempotent retry reads
 # its signed `previous` pointer and proves the candidate is byte-identical.
 POINTER_FILTER="$HERE/publication-previous.jq"
-CANDIDATE_SHA="$(printf candidate-record | sha256sum | awk '{print $1}')"
-PRIOR_SHA="$(printf prior-record | sha256sum | awk '{print $1}')"
+CANDIDATE_SHA="$(sha256_str candidate-record)"
+PRIOR_SHA="$(sha256_str prior-record)"
 jq -n --arg tag v0.1.139 --arg sha "$PRIOR_SHA" \
   '{schema:"velnor.publication-record/v1", tag:$tag, source_record_sha256:$sha}' \
   | jq -e --arg candidate v0.1.140 --arg prior v0.1.139 \
