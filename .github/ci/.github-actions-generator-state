@@ -1,5 +1,10 @@
 # Generated ownership state; do not edit.
-schema = 1
+schema = 2
+[inputs]
+config	08f44b07b5901a25
+scan	38b05485b389f096
+generator	1
+[outputs]
 .github/actionlint.yaml	ec35f48ae7e90e0e
 .github/actions/aggregate/action.yml	1bd94bc0de749c88
 .github/actions/cache-contract/action.yml	0c9b22af7a8aa0bc
@@ -7,14 +12,14 @@ schema = 1
 .github/ci/project.toml	64d148f5c1c76879
 .github/ci/workflow-templates/ci-apt.yml	981f5a8131fe9828
 .github/ci/workflow-templates/ci.yml	802bc36168b4cf48
-.github/ci/workflow-templates/package-update.yml	b9ced612fa14cab8
+.github/ci/workflow-templates/package-update.yml	8c8f686bbd56d5ce
 .github/ci/workflow-templates/package-updater.yml	a90605ea87c8a4b3
 .github/ci/workflow-templates/publish.yml	6da983fba93cef52
 .github/ci/workflow-templates/renovate.yml	c2affe61fe978f53
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
 .github/workflows/ci-apt.yml	981f5a8131fe9828
 .github/workflows/ci.yml	802bc36168b4cf48
-.github/workflows/package-update.yml	b9ced612fa14cab8
+.github/workflows/package-update.yml	8c8f686bbd56d5ce
 .github/workflows/package-updater.yml	a90605ea87c8a4b3
 .github/workflows/publish.yml	6da983fba93cef52
 .github/workflows/renovate.yml	c2affe61fe978f53
