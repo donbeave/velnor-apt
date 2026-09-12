@@ -395,17 +395,21 @@ preview_asset() { # <version> <arch> -> dotted preview asset name
 }
 
 refresh_preview_metadata() { # <dir> <version> <commit> — rebuild sidecars,
-  local dir="$1" ver="$2" commit="$3" arch name deb hash assets  # SHA256SUMS and
-  assets="$WORK/preview-assets.$$"                               # release-manifest
+  local dir="$1" ver="$2" commit="$3" arch name rname deb hash assets  # SHA256SUMS and
+  assets="$WORK/preview-assets.$$"                                     # release-manifest
   : > "$assets"
   : > "$dir/SHA256SUMS"
   for arch in $REQUIRED_ARCHES; do
     name="$(preview_asset "$ver" "$arch")"
+    # The source release binds the tilde asset name in SHA256SUMS and the
+    # release manifest (GitHub normalizes only uploaded filenames) and writes
+    # digest-only sidecars; mirror that exactly.
+    rname="velnor-runner-preview-${ver}-${arch}.deb"
     deb="$dir/$name"
     hash="$(sha256_file "$deb")"
-    printf '%s  %s\n' "$hash" "$name" > "$deb.sha256"
-    printf '%s  %s\n' "$hash" "$name" >> "$dir/SHA256SUMS"
-    jq -cn --arg name "$name" --arg sha256 "$hash" '{name:$name,sha256:$sha256}' >> "$assets"
+    printf '%s\n' "$hash" > "$deb.sha256"
+    printf '%s  %s\n' "$hash" "$rname" >> "$dir/SHA256SUMS"
+    jq -cn --arg name "$rname" --arg sha256 "$hash" '{name:$name,sha256:$sha256}' >> "$assets"
   done
   jq -Sn --arg source_repository "tailrocks/velnor" --arg source_ref "refs/heads/main" \
     --arg source_commit "$commit" --arg version "$ver" --slurpfile assets "$assets" \
@@ -501,6 +505,21 @@ expect_reject_preview "release-manifest version != requested preview version" "$
 D="$(preview_copy neg_preview_sidecar)"
 printf 'x' >> "$D/$(preview_asset "$PVERSION" amd64)"
 expect_reject_preview "tampered preview deb fails its sidecar checksum" "$D"
+
+# A sidecar that DOES carry a name field must name the right deb (velnor ships
+# digest-only sidecars; a named sidecar is still valid input).
+D="$(preview_copy neg_preview_sidecar_name)"
+printf '%s  %s\n' "$(sha256_file "$D/$(preview_asset "$PVERSION" amd64)")" \
+  "velnor-runner-preview-${PBASE}-amd64.deb" > "$D/$(preview_asset "$PVERSION" amd64).sha256"
+expect_reject_preview "preview sidecar names a different deb than its own" "$D"
+
+# The digest-only sidecar form velnor actually publishes must verify (the
+# positive fixture above already uses it; assert the named variant too).
+D="$(preview_copy pos_preview_named_sidecar)"
+printf '%s  %s\n' "$(sha256_file "$D/$(preview_asset "$PVERSION" amd64)")" \
+  "$(preview_asset "$PVERSION" amd64)" > "$D/$(preview_asset "$PVERSION" amd64).sha256"
+run_verify_preview "$D" || die "named sidecar preview fixture should verify"
+ok "preview accepted: named sidecar variant"
 
 D="$(preview_copy neg_preview_extra)"
 cp "$D/$(preview_asset "$PVERSION" amd64)" \

@@ -418,7 +418,7 @@ verify_preview() {
     || fail "release-manifest must list exactly two assets"
 
   # --- per-arch sidecar, SHA256SUMS, manifest hash, and packaged identity ------
-  local arch deb_name deb deb_sum want_deb have_deb manifest_deb sums_line
+  local arch deb_name release_name deb deb_sum want_deb have_deb manifest_deb sums_line
   for arch in $REQUIRED_ARCHES; do
     deb_name="velnor-runner-preview-${asset_version}-${arch}.deb"
     deb="$incoming/$deb_name"
@@ -426,9 +426,14 @@ verify_preview() {
     require_file "$deb_sum"
     [ "$(awk 'END{print NR+0}' "$deb_sum")" = "1" ] \
       || fail "$arch preview sidecar must be a single line"
-    # Sidecar format: "<64hex>  <name>"
-    [ "$(awk 'NR==1{print $2}' "$deb_sum")" = "$deb_name" ] \
-      || fail "$arch preview sidecar does not name $deb_name"
+    # Sidecar format: "<64hex>  <name>", or a bare "<64hex>" line — the velnor
+    # rolling preview publishes digest-only sidecars, so a missing name field
+    # binds the sidecar to its deb by digest alone (SHA256SUMS still pins the
+    # name below); a present name field must match exactly.
+    if [ -n "$(awk 'NR==1{print $2}' "$deb_sum")" ]; then
+      [ "$(awk 'NR==1{print $2}' "$deb_sum")" = "$deb_name" ] \
+        || fail "$arch preview sidecar does not name $deb_name"
+    fi
     want_deb="$(awk 'NR==1{print $1}' "$deb_sum")"
     case "$want_deb" in
       *[!0-9a-f]* | "") fail "$arch preview sidecar digest is not lowercase hex" ;;
@@ -436,9 +441,15 @@ verify_preview() {
     [ "${#want_deb}" -eq 64 ] || fail "$arch preview sidecar digest is not 64 hex chars"
     have_deb="$(sha256 "$deb")"
     [ "$want_deb" = "$have_deb" ] || fail "$arch preview deb sidecar checksum mismatch"
-    sums_line="$(awk -v n="$deb_name" '$2 == n {print $1}' "$sums")"
+    # SHA256SUMS and the release manifest bind the tilde (un-normalized) asset
+    # name — GitHub rewrites `~` to `.` only in uploaded filenames, never in the
+    # coherence files velnor publishes. Accept either spelling; the digest
+    # comparison below is what actually binds the file.
+    release_name="velnor-runner-preview-${ver}-${arch}.deb"
+    sums_line="$(awk -v n="$release_name" -v f="$deb_name" '$2 == n || $2 == f {print $1}' "$sums")"
     [ "$sums_line" = "$have_deb" ] || fail "$arch preview deb hash is not pinned by SHA256SUMS"
-    manifest_deb="$(jq -er --arg n "$deb_name" '.assets[] | select(.name==$n) | .sha256' "$manifest")"
+    manifest_deb="$(jq -er --arg n "$release_name" --arg f "$deb_name" \
+      '.assets[] | select(.name==$n or .name==$f) | .sha256' "$manifest")"
     [ "$manifest_deb" = "$have_deb" ] \
       || fail "$arch preview deb hash != release-manifest asset sha256"
 
