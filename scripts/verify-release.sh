@@ -32,14 +32,24 @@
 #             Preview attestation gating (gh attestation verify
 #             --deny-self-hosted-runners) belongs to the caller, not here.
 #
+# CALLER CONTRACT for choosing the preview publication mode: decide by whether
+# the live $APT_BASE_URL/dists/preview/InRelease exists. If ANY prior preview
+# publication exists, prefer the strict path (--prev-dir with the recovered
+# rollback pair). Only when no live preview suite exists at all may the caller
+# use `publish --suite preview --bootstrap`, which initializes the suite from
+# the candidate pair alone (exactly 2 pool debs, 1 version per arch, previous
+# pointer = JSON null). Bootstrap refuses to run over an existing preview pool,
+# so it can never silently discard a retained rollback.
+#
 # Subcommands:
 #   resolve-commit --version vX.Y.Z
 #   download       [--suite stable|preview] --version <version> --dir <incoming>
 #   verify         [--suite stable|preview] --version <version> --incoming <dir> \
 #                  --commit <sha> --signer <live-fpr> --expect-signer <pinned-fpr> \
 #                  [--verify-oci]
-#   publish        [--suite stable|preview] --version <version> --incoming <dir> \
-#                  --prev-dir <dir> --previous-pointer <file> \
+#   publish        [--suite stable|preview] [--bootstrap] --version <version> \
+#                  --incoming <dir> (--prev-dir <dir> | --bootstrap) \
+#                  --previous-pointer <file> \
 #                  --signer <live-fpr>            (needs reprepro + gpg)
 #
 # `verify` is fully offline-testable: point --incoming at a directory of
@@ -529,7 +539,12 @@ cmd_publish() {
   # (the caller already assembled it for both suites), only dists/preview,
   # pool/preview and the preview metadata are written, and the previous pointer
   # is the JSON string "preview".
+  #
+  # --bootstrap initializes a preview suite that has never been published: it is
+  # exclusive to --suite preview and to --prev-dir, stages exactly the candidate
+  # pair, and takes the JSON null previous pointer.
   local version="" incoming="" prev_dir="" previous_pointer="" signer="" suite
+  local bootstrap=0
   suite=stable
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -539,6 +554,7 @@ cmd_publish() {
       --previous-pointer) previous_pointer="$2"; shift 2 ;;
       --signer) signer="$2"; shift 2 ;;
       --suite) suite="$(parse_suite "${2:-}" publish)"; shift 2 ;;
+      --bootstrap) bootstrap=1; shift ;;
       *) fail "publish: unknown arg $1" ;;
     esac
   done
@@ -546,12 +562,16 @@ cmd_publish() {
   [ -n "$incoming" ] || fail "publish: --incoming required"
   [ -f "$previous_pointer" ] || fail "publish: --previous-pointer required"
   [ -n "$signer" ] || fail "publish: --signer required"
+  if [ "$bootstrap" = 1 ]; then
+    [ "$suite" = preview ] || fail "publish: --bootstrap applies only to --suite preview"
+    [ -z "$prev_dir" ] || fail "publish: --bootstrap is mutually exclusive with --prev-dir"
+  fi
   [ -f "$incoming/.reprepro-ok" ] || fail "publish: refusing — verify has not armed the reprepro sentinel"
   command -v apt-ftparchive >/dev/null 2>&1 || fail "publish: apt-ftparchive not installed"
   command -v dpkg-deb >/dev/null 2>&1 || fail "publish: dpkg-deb not installed"
   command -v gpg >/dev/null 2>&1 || fail "publish: gpg not installed"
   if [ "$suite" = preview ]; then
-    publish_preview "$version" "$incoming" "$prev_dir" "$previous_pointer" "$signer"
+    publish_preview "$version" "$incoming" "$prev_dir" "$previous_pointer" "$signer" "$bootstrap"
     return
   fi
 
@@ -678,14 +698,26 @@ DIST
 # the retained rollback pair is mandatory and the candidate must be strictly
 # newer than it (dpkg version order), because a preview channel that can move
 # backwards is worse than one that fails closed.
+#
+# --bootstrap is the one initialization path for a preview suite that has never
+# been published (no live dists/preview exists to recover a rollback pair from):
+# it stages exactly the candidate pair, keeps exactly the candidate version in
+# each index, and takes the JSON null previous pointer. It fails when the pool
+# already holds anything beyond the candidate pair, so a retained rollback can
+# never be discarded; the caller must use the strict path whenever a prior
+# preview publication exists.
 publish_preview() {
-  local version="$1" incoming="$2" prev_dir="$3" previous_pointer="$4" signer="$5"
+  local version="$1" incoming="$2" prev_dir="$3" previous_pointer="$4" signer="$5" bootstrap="$6"
   local ver="$version"
   command -v dpkg >/dev/null 2>&1 || fail "publish: dpkg not installed (needed for preview version ordering)"
 
   parse_preview_version "$ver"
-  [ -n "$prev_dir" ] \
-    || fail "publish: --prev-dir is required for the preview suite (the retained preview rollback pair)"
+  if [ "$bootstrap" = 1 ]; then
+    :
+  else
+    [ -n "$prev_dir" ] \
+      || fail "publish: --prev-dir is required for the preview suite (the retained preview rollback pair; use --bootstrap to initialize the suite)"
+  fi
 
   mkdir -p public/conf public/pool/preview/main/v/velnor-runner
   # Second stanza for the preview suite; idempotent so a re-run never duplicates.
@@ -728,24 +760,44 @@ DIST
   }
   # Same deterministic-pool rule as stable: materialize only the already-verified
   # prior and candidate bytes, canonically named with dpkg underscores.
-  for deb in "$prev_dir"/velnor-runner-preview-*.deb; do
-    [ -f "$deb" ] || continue
-    candidate="$incoming/$(basename "$deb")"
-    if [ -f "$candidate" ]; then
-      [ "$(sha256 "$candidate")" = "$(sha256 "$deb")" ] \
-        || fail "published package name collides with different candidate bytes: $(basename "$deb")"
-      continue
-    fi
-    stage_preview_package "$deb"
-  done
-  for deb in "$incoming"/velnor-runner-preview-*.deb; do
-    [ -f "$deb" ] || continue
-    [ "$(deb_field "$deb" Version)" = "$ver" ] \
-      || fail "publish: candidate deb Version != preview candidate version $ver"
-    stage_preview_package "$deb"
-  done
-  [ "$(find public/pool/preview/main/v/velnor-runner -type f -name '*.deb' | awk 'END { print NR }')" = 4 ] \
-    || fail "publish: deterministic preview pool must contain exactly four package files"
+  if [ "$bootstrap" = 1 ]; then
+    # Initialization: nothing is recovered, so anything already in the pool
+    # beyond the candidate pair means a preview suite already exists.
+    local expected_deb
+    for deb in "$incoming"/velnor-runner-preview-*.deb; do
+      [ -f "$deb" ] || continue
+      [ "$(deb_field "$deb" Version)" = "$ver" ] \
+        || fail "publish: candidate deb Version != preview candidate version $ver"
+      stage_preview_package "$deb"
+    done
+    for expected_deb in \
+      "public/pool/preview/main/v/velnor-runner/velnor-runner_${ver}_amd64.deb" \
+      "public/pool/preview/main/v/velnor-runner/velnor-runner_${ver}_arm64.deb"; do
+      [ -f "$expected_deb" ] \
+        || fail "publish: bootstrap must stage the complete candidate pair (missing $(basename "$expected_deb"))"
+    done
+    [ "$(find public/pool/preview/main/v/velnor-runner -type f -name '*.deb' | awk 'END { print NR }')" = 2 ] \
+      || fail "publish: bootstrap refuses to run over an existing preview pool (found $(find public/pool/preview/main/v/velnor-runner -type f -name '*.deb' | awk 'END { print NR }') package files; recover the rollback pair and publish the strict path)"
+  else
+    for deb in "$prev_dir"/velnor-runner-preview-*.deb; do
+      [ -f "$deb" ] || continue
+      candidate="$incoming/$(basename "$deb")"
+      if [ -f "$candidate" ]; then
+        [ "$(sha256 "$candidate")" = "$(sha256 "$deb")" ] \
+          || fail "published package name collides with different candidate bytes: $(basename "$deb")"
+        continue
+      fi
+      stage_preview_package "$deb"
+    done
+    for deb in "$incoming"/velnor-runner-preview-*.deb; do
+      [ -f "$deb" ] || continue
+      [ "$(deb_field "$deb" Version)" = "$ver" ] \
+        || fail "publish: candidate deb Version != preview candidate version $ver"
+      stage_preview_package "$deb"
+    done
+    [ "$(find public/pool/preview/main/v/velnor-runner -type f -name '*.deb' | awk 'END { print NR }')" = 4 ] \
+      || fail "publish: deterministic preview pool must contain exactly four package files"
+  fi
 
   local arch packages versions rollback_version="" arch_rollback
   for arch in $REQUIRED_ARCHES; do
@@ -754,18 +806,25 @@ DIST
     (cd public && apt-ftparchive -a "$arch" packages pool/preview) > "$packages"
     versions="$(awk '$1=="Package:"{p=$2} p=="velnor-runner" && $1=="Version:"{print $2}' \
       "$packages" | sort -u)"
-    [ "$(printf '%s\n' "$versions" | awk 'NF{n++} END{print n+0}')" = 2 ] \
-      || fail "publish: $arch preview index must retain exactly candidate plus rollback version (observed: $(printf '%s' "$versions" | tr '\n' ','))"
-    printf '%s\n' "$versions" | grep -Fx "$ver" >/dev/null \
-      || fail "publish: $arch preview index lacks candidate version $ver"
-    arch_rollback="$(printf '%s\n' "$versions" | grep -Fxv "$ver")"
-    [ -n "$arch_rollback" ] || fail "publish: $arch preview rollback version is empty"
-    if [ -z "$rollback_version" ]; then rollback_version="$arch_rollback"; fi
-    [ "$arch_rollback" = "$rollback_version" ] \
-      || fail "publish: architecture preview rollback versions differ"
-    # Strict monotonicity: a preview may never replace an equal or newer one.
-    if ! dpkg --compare-versions "$ver" gt "$arch_rollback"; then
-      fail "publish: preview candidate $ver is not newer than the retained rollback $arch_rollback"
+    if [ "$bootstrap" = 1 ]; then
+      [ "$(printf '%s\n' "$versions" | awk 'NF{n++} END{print n+0}')" = 1 ] \
+        || fail "publish: $arch bootstrap index must retain exactly the candidate version (observed: $(printf '%s' "$versions" | tr '\n' ','))"
+      printf '%s\n' "$versions" | grep -Fx "$ver" >/dev/null \
+        || fail "publish: $arch bootstrap index lacks candidate version $ver"
+    else
+      [ "$(printf '%s\n' "$versions" | awk 'NF{n++} END{print n+0}')" = 2 ] \
+        || fail "publish: $arch preview index must retain exactly candidate plus rollback version (observed: $(printf '%s' "$versions" | tr '\n' ','))"
+      printf '%s\n' "$versions" | grep -Fx "$ver" >/dev/null \
+        || fail "publish: $arch preview index lacks candidate version $ver"
+      arch_rollback="$(printf '%s\n' "$versions" | grep -Fxv "$ver")"
+      [ -n "$arch_rollback" ] || fail "publish: $arch preview rollback version is empty"
+      if [ -z "$rollback_version" ]; then rollback_version="$arch_rollback"; fi
+      [ "$arch_rollback" = "$rollback_version" ] \
+        || fail "publish: architecture preview rollback versions differ"
+      # Strict monotonicity: a preview may never replace an equal or newer one.
+      if ! dpkg --compare-versions "$ver" gt "$arch_rollback"; then
+        fail "publish: preview candidate $ver is not newer than the retained rollback $arch_rollback"
+      fi
     fi
     gzip -n -9 -c "$packages" > "$packages.gz"
   done
@@ -790,9 +849,15 @@ DIST
 
   # A preview has no release record to roll back to, so its previous pointer is
   # the JSON string "preview" (stable's tag/record-digest and legacy-string
-  # rules do not apply here).
-  jq -e 'type == "string" and . == "preview"' "$previous_pointer" >/dev/null \
-    || fail "publish: preview previous pointer must be the JSON string \"preview\""
+  # rules do not apply here). An initialized suite has none at all: bootstrap
+  # requires the JSON null pointer.
+  if [ "$bootstrap" = 1 ]; then
+    jq -e 'type == "null"' "$previous_pointer" >/dev/null \
+      || fail "publish: bootstrap previous pointer must be JSON null"
+  else
+    jq -e 'type == "string" and . == "preview"' "$previous_pointer" >/dev/null \
+      || fail "publish: preview previous pointer must be the JSON string \"preview\""
+  fi
 
   emit_publication_record_preview "$version" "$incoming" "$signer" "$previous_pointer"
   log "preview publication staged in ./public and publication-record-preview.json signed; live Pages untouched"
@@ -803,6 +868,8 @@ DIST
 # record (no `suite` field), preview declares suite:"preview". `tag` is the
 # literal rolling release tag, and `source_record_sha256` pins the preview
 # release-manifest.json — the source-owned coherence record this channel has.
+# `previous` is the JSON string "preview" once a rollback pair is retained, and
+# JSON null for a bootstrapped suite that has never published before.
 emit_publication_record_preview() {
   local version="$1" incoming="$2" signer="$3" previous_pointer="$4"
   local ver="${version#v}"

@@ -792,6 +792,100 @@ fi
   || die "preview publication wrote despite the missing sentinel"
 ok "preview rejected: publication without the armed reprepro sentinel"
 
+# --- preview bootstrap: the one initialization path ---------------------------
+# The FIRST publication of a preview suite has no live dists/preview to recover
+# a rollback pair from, so --bootstrap stages the candidate pair alone: exactly
+# two pool debs, exactly one (candidate) version per index, JSON null previous.
+# The caller chooses bootstrap only when no live preview suite exists.
+BOOT="$WORK/publish-preview-bootstrap"
+mkdir -p "$BOOT/run" "$BOOT/incoming"
+cp -R "$PBASE/." "$BOOT/incoming/"
+printf 'null\n' > "$BOOT/pointer.json"
+run_verify_preview "$BOOT/incoming" \
+  || die "coherent preview fixture should verify before bootstrap"
+
+run_bootstrap() { # <cwd> <incoming> <pointer> [extra args...]
+  local cwd="$1" incoming="$2" pointer="$3"; shift 3
+  (
+    cd "$cwd"
+    PATH="$PUBP/bin:$PATH" APT_GPG_PASSPHRASE='fixture-passphrase' \
+      bash "$SCRIPT" publish --suite preview --bootstrap --version "$PVERSION" \
+        --incoming "$incoming" --previous-pointer "$pointer" --signer "$SIGNER" "$@"
+  )
+}
+
+run_bootstrap "$BOOT/run" "$BOOT/incoming" "$BOOT/pointer.json" \
+  || die "preview bootstrap publication failed"
+
+[ -f "$BOOT/run/public/publication-record-preview.json" ] \
+  || die "bootstrap publication record missing from the Pages tree"
+[ -f "$BOOT/run/public/publication-record-preview.json.sig" ] \
+  || die "bootstrap publication signature missing from the Pages tree"
+[ -f "$BOOT/run/public/dists/preview/InRelease" ] || die "bootstrap InRelease missing"
+[ "$(cat "$BOOT/run/public/last-publish-preview")" = "$PVERSION" ] \
+  || die "bootstrap last-publish pointer mismatch"
+[ "$(find "$BOOT/run/public/pool/preview" -type f -name '*.deb' | wc -l | tr -d ' ')" = "2" ] \
+  || die "bootstrap pool must contain exactly the candidate pair"
+for arch in $REQUIRED_ARCHES; do
+  [ -f "$BOOT/run/public/pool/preview/main/v/velnor-runner/velnor-runner_${PVERSION}_${arch}.deb" ] \
+    || die "bootstrap candidate not staged under its canonical dpkg name ($arch)"
+  versions="$(awk '$1=="Version:"{print $2}' \
+    "$BOOT/run/public/dists/preview/main/binary-$arch/Packages" | sort -u)"
+  [ "$(printf '%s\n' "$versions" | awk 'NF{n++} END{print n+0}')" = 1 ] \
+    || die "$arch bootstrap index must retain exactly the candidate version"
+  printf '%s\n' "$versions" | grep -Fx "$PVERSION" >/dev/null \
+    || die "$arch bootstrap index lost the candidate version"
+done
+grep -q '^Codename: preview$' "$BOOT/run/public/conf/distributions" \
+  || die "bootstrap did not add its distribution stanza"
+jq -e --arg version "$PVERSION" '
+  .schema == "velnor.publication-record/v1" and .suite == "preview" and
+  .tag == "preview" and .crate_version == $version and .previous == null and
+  (.source_record_sha256 | type == "string" and test("^[0-9a-f]{64}$")) and
+  ([.packages[].arch] | sort) == ["amd64","arm64"]
+' "$BOOT/run/public/publication-record-preview.json" >/dev/null \
+  || die "bootstrap publication record must carry a null previous pointer"
+[ ! -e "$BOOT/run/public/publication-record.json" ] \
+  || die "bootstrap invented stable artifacts"
+ok "preview bootstrap initializes the suite from the candidate pair alone (null previous)"
+
+run_bootstrap "$BOOT/run" "$BOOT/incoming" "$BOOT/pointer.json" \
+  || die "bootstrap re-run should stay idempotent on its own tree"
+[ "$(find "$BOOT/run/public/pool/preview" -type f -name '*.deb' | wc -l | tr -d ' ')" = "2" ] \
+  || die "bootstrap re-run grew the pool beyond the candidate pair"
+ok "preview bootstrap re-run stays idempotent on its own tree"
+
+# Bootstrap must never run where a preview suite already retains a rollback pair.
+if run_bootstrap "$PUBP/run" "$PUBP/preview-incoming" "$BOOT/pointer.json" >/dev/null 2>&1; then
+  die "bootstrap accepted a tree that already holds a retained preview rollback pair"
+fi
+[ "$(find "$PUBP/run/public/pool/preview" -type f -name '*.deb' | wc -l | tr -d ' ')" = "4" ] \
+  || die "bootstrap mutated an existing preview pool"
+ok "preview rejected: bootstrap over a tree that already retains a rollback pair"
+
+if run_bootstrap "$BOOT/run" "$BOOT/incoming" "$BOOT/pointer.json" \
+     --prev-dir "$PUBP/preview-previous" >/dev/null 2>&1; then
+  die "bootstrap accepted --prev-dir alongside it"
+fi
+ok "preview rejected: --bootstrap is mutually exclusive with --prev-dir"
+
+if (cd "$PUB_NO_PASS" && PATH="$PUBP/bin:$PATH" APT_GPG_PASSPHRASE='fixture-passphrase' \
+      bash "$SCRIPT" publish --suite stable --bootstrap --version "$VERSION" \
+        --incoming . --prev-dir "$PUB/previous" \
+        --previous-pointer "$PUB/previous-pointer.json" --signer "$SIGNER" \
+      >/dev/null 2>&1); then
+  die "bootstrap accepted the stable suite"
+fi
+ok "preview rejected: --bootstrap does not apply to --suite stable"
+
+printf '%s\n' '"preview"' > "$BOOT/string-pointer.json"
+if run_bootstrap "$BOOT/run" "$BOOT/incoming" "$BOOT/string-pointer.json" >/dev/null 2>&1; then
+  die "bootstrap accepted a rollback-style previous pointer"
+fi
+[ "$(jq -r '.previous' "$BOOT/run/public/publication-record-preview.json")" = "null" ] \
+  || die "bootstrap rewrote the publication record despite a malformed previous pointer"
+ok "preview rejected: bootstrap previous pointer is not JSON null"
+
 # The source image is private. Its verifier must receive only package-read
 grep -q '^  packages: read$' "$WORKFLOW" \
   || die "publisher lacks package-read authority"
