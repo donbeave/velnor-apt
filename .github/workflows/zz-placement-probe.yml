@@ -1,0 +1,31 @@
+# Temporary diagnostic workflow (placement probe). Delete after diagnosis.
+name: zz-placement-probe
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: zz-placement-probe
+  cancel-in-progress: true
+
+jobs:
+  a-object-array:
+    runs-on: ${{ fromJSON('{"group":"velnor-trusted","labels":["self-hosted","velnor-target-mvp"]}') }}
+    steps:
+      - run: echo "A object+array placed on ${{ runner.name }}"
+  b-object-string:
+    runs-on: ${{ fromJSON('{"group":"velnor-trusted","labels":"self-hosted,velnor-target-mvp"}') }}
+    steps:
+      - run: echo "B object+string placed on ${{ runner.name }}"
+  c-block-array:
+    runs-on:
+      group: velnor-trusted
+      labels: [self-hosted, velnor-target-mvp]
+    steps:
+      - run: echo "C block+array placed on ${{ runner.name }}"
+  d-labels-only:
+    runs-on: ${{ fromJSON('["self-hosted","velnor-target-mvp"]') }}
+    steps:
+      - run: echo "D labels-only placed on ${{ runner.name }}"
