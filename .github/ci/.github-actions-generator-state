@@ -14,12 +14,12 @@ generator	4
 .github/ci/workflow-templates/ci.yml	802bc36168b4cf48
 .github/ci/workflow-templates/package-update.yml	8c8f686bbd56d5ce
 .github/ci/workflow-templates/package-updater.yml	a90605ea87c8a4b3
-.github/ci/workflow-templates/publish.yml	5e2203e92ce7b468
-.github/ci/workflow-templates/renovate.yml	c2affe61fe978f53
+.github/ci/workflow-templates/publish.yml	d918a638d019af89
+.github/ci/workflow-templates/renovate.yml	db8df6bfe425a211
 .github/workflows/AGENTS.md	81c8ab9ea68cc549
 .github/workflows/ci-apt.yml	981f5a8131fe9828
 .github/workflows/ci.yml	802bc36168b4cf48
 .github/workflows/package-update.yml	8c8f686bbd56d5ce
 .github/workflows/package-updater.yml	a90605ea87c8a4b3
-.github/workflows/publish.yml	5e2203e92ce7b468
-.github/workflows/renovate.yml	c2affe61fe978f53
+.github/workflows/publish.yml	d918a638d019af89
+.github/workflows/renovate.yml	db8df6bfe425a211
