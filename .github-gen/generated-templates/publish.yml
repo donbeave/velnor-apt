@@ -342,7 +342,7 @@ jobs:
                 # The pool stores Debian-style names: the source package with
                 # underscores and the preview channel inside the version
                 # (velnor-runner_0.1.274~preview.N+<sha>_<arch>.deb).
-                velnor-runner_*preview*_*.deb) ;;
+                *velnor-runner_*preview*_*.deb) ;;
                 *) echo "::error::signed preview rollback is not a preview package" >&2; exit 1 ;;
               esac
               curl -fsS "$APT_BASE_URL/$filename" -o "$deb"
