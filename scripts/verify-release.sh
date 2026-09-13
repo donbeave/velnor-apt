@@ -798,7 +798,11 @@ DIST
     [ "$(find public/pool/preview/main/v/velnor-runner -type f -name '*.deb' | awk 'END { print NR }')" = 2 ] \
       || fail "publish: bootstrap refuses to run over an existing preview pool (found $(find public/pool/preview/main/v/velnor-runner -type f -name '*.deb' | awk 'END { print NR }') package files; recover the rollback pair and publish the strict path)"
   else
-    for deb in "$prev_dir"/velnor-runner-preview-*.deb; do
+    # The retained rollback pair carries the canonical dpkg pool naming
+    # (velnor-runner_<version>_<arch>.deb, written by the workflow's recovery
+    # step from the live signed index); older recoveries may still carry the
+    # GitHub asset naming, so match both spellings.
+    for deb in "$prev_dir"/velnor-runner-preview-*.deb "$prev_dir"/velnor-runner_*preview*_*.deb; do
       [ -f "$deb" ] || continue
       candidate="$incoming/$(basename "$deb")"
       if [ -f "$candidate" ]; then
